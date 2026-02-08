@@ -183,23 +183,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var timer: Timer?
     private var currentUsageData: UsageData?
     private var configDialog: ConfigDialog?
+    private var accountManagerDialog: AccountManagerDialog?
 
     // 菜单项引用
+    private var currentAccountItem: NSMenuItem?
+    private var switchAccountItem: NSMenuItem?
+    private var switchAccountMenu: NSMenu?
     private var tokenPercentItem: NSMenuItem?
     private var tokenDetailItem: NSMenuItem?
     private var mcpDetailItem: NSMenuItem?
     private var separator1: NSMenuItem?
     private var separator2: NSMenuItem?
+    private var separator3: NSMenuItem?
     private var modelUsageItems: [NSMenuItem] = []
     private var updateTimeItem: NSMenuItem?
     private var refreshItem: NSMenuItem?
+    private var manageAccountsItem: NSMenuItem?
     private var configItem: NSMenuItem?
     private var quitItem: NSMenuItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
-        // 初始化 API 服务
+        // 迁移旧配置并初始化 API 服务
+        UserDefaults.standard.migrateLegacyConfig()
         apiService = APIService()
 
         // 创建菜单栏图标
@@ -208,8 +215,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.title = " GLM"
         }
 
-        // 检查配置，如果没有则显示配置对话框
-        if !(apiService?.hasConfig() ?? false) {
+        // 检查是否有账号配置，如果没有则显示配置对话框
+        if !UserDefaults.standard.hasAnyValidAccount() {
             showConfigDialog()
         } else {
             // 立即刷新一次数据
@@ -223,12 +230,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // 构建菜单
         buildMenu()
+        updateAccountDisplay()
     }
 
     private func buildMenu() {
         guard let statusItem = statusItem else { return }
 
         let menu = NSMenu()
+
+        // 当前账号信息
+        currentAccountItem = NSMenuItem(title: "账号: 加载中...", action: nil, keyEquivalent: "")
+        currentAccountItem?.isEnabled = false
+        menu.addItem(currentAccountItem!)
 
         // Token 用量百分比
         tokenPercentItem = NSMenuItem(title: "加载中...", action: nil, keyEquivalent: "")
@@ -266,13 +279,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateTimeItem?.isEnabled = false
         menu.addItem(updateTimeItem!)
 
+        // 分隔符
+        separator3 = NSMenuItem.separator()
+        menu.addItem(separator3!)
+
+        // 切换账号子菜单
+        switchAccountItem = NSMenuItem(title: "切换账号", action: nil, keyEquivalent: "s")
+        switchAccountMenu = NSMenu()
+        switchAccountItem?.submenu = switchAccountMenu
+        menu.addItem(switchAccountItem!)
+
+        // 账号管理
+        manageAccountsItem = NSMenuItem(title: "账号管理...", action: #selector(showAccountManager), keyEquivalent: "")
+        manageAccountsItem?.target = self
+        menu.addItem(manageAccountsItem!)
+
         // 刷新按钮
         refreshItem = NSMenuItem(title: "刷新", action: #selector(manualRefresh), keyEquivalent: "r")
         refreshItem?.target = self
         menu.addItem(refreshItem!)
 
-        // 配置按钮
-        configItem = NSMenuItem(title: "配置...", action: #selector(showConfigDialog), keyEquivalent: ",")
+        // 配置按钮（保留用于快速添加新账号）
+        configItem = NSMenuItem(title: "添加账号...", action: #selector(showConfigDialog), keyEquivalent: ",")
         configItem?.target = self
         menu.addItem(configItem!)
 
@@ -286,6 +314,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func updateMenu() {
         guard let data = currentUsageData else { return }
+
+        // 更新账号显示
+        updateAccountDisplay()
 
         // 更新标题栏百分比
         let percent = Int(data.tokenUsagePercent * 100)
@@ -329,6 +360,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm:ss"
         updateTimeItem?.title = "更新时间: \(formatter.string(from: data.lastUpdateTime))"
+
+        // 更新切换账号子菜单
+        updateSwitchAccountMenu()
+    }
+
+    private func updateAccountDisplay() {
+        if let accountName = apiService?.getCurrentAccountName() {
+            currentAccountItem?.title = "账号: \(accountName)"
+        } else {
+            currentAccountItem?.title = "账号: 未配置"
+        }
+    }
+
+    private func updateSwitchAccountMenu() {
+        guard let menu = switchAccountMenu else { return }
+        menu.removeAllItems()
+
+        let accounts = UserDefaults.standard.getAccounts()
+        let currentId = UserDefaults.standard.string(forKey: "GLM_CURRENT_ACCOUNT_ID")
+
+        if accounts.isEmpty {
+            let item = NSMenuItem(title: "无账号", action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            menu.addItem(item)
+            return
+        }
+
+        for account in accounts {
+            let item = NSMenuItem(
+                title: account.name,
+                action: #selector(switchToAccount(_:)),
+                keyEquivalent: ""
+            )
+            item.tag = Int(account.id.hashValue)
+            item.target = self
+            if account.id == currentId {
+                item.state = .on
+            }
+            menu.addItem(item)
+        }
     }
 
     private func formatNumber(_ value: Int) -> String {
@@ -375,14 +446,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func showConfigDialog() {
         if configDialog == nil {
             configDialog = ConfigDialog { [weak self] baseURL, token in
-                self?.apiService?.updateConfig(baseURL: baseURL, authToken: token)
-                // 配置更新后立即刷新
+                // 创建新账号
+                let account = AccountConfig(
+                    id: UUID().uuidString,
+                    name: "新账号 \(UserDefaults.standard.getAccounts().count + 1)",
+                    baseURL: baseURL,
+                    authToken: token
+                )
+                UserDefaults.standard.addAccount(account)
+                // 切换到新账号
+                self?.apiService?.switchAccount(account.id)
+                // 立即刷新
                 Task {
                     await self?.refreshUsageData()
                 }
             }
         }
         configDialog?.showDialog()
+    }
+
+    @objc private func switchToAccount(_ sender: NSMenuItem) {
+        let accounts = UserDefaults.standard.getAccounts()
+        if let account = accounts.first(where: { Int($0.id.hashValue) == sender.tag }) {
+            apiService?.switchAccount(account.id)
+            Task {
+                await refreshUsageData()
+            }
+        }
+    }
+
+    @objc private func showAccountManager() {
+        if accountManagerDialog == nil {
+            accountManagerDialog = AccountManagerDialog()
+            accountManagerDialog?.onAccountChanged = { [weak self] in
+                // 账号变更后刷新显示
+                self?.updateAccountDisplay()
+                self?.updateSwitchAccountMenu()
+                // 重新加载当前账号并刷新数据
+                Task {
+                    await self?.refreshUsageData()
+                }
+            }
+        }
+        accountManagerDialog?.showDialog()
     }
 
     @objc private func quit() {

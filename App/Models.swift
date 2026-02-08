@@ -211,6 +211,22 @@ struct APIConfig: Codable {
     }
 }
 
+/// 账号配置模型
+struct AccountConfig: Codable, Identifiable {
+    let id: String
+    var name: String
+    let baseURL: String
+    var authToken: String
+
+    var isValid: Bool {
+        !baseURL.isEmpty && !authToken.isEmpty
+    }
+
+    var serviceProvider: String {
+        baseURL.contains("bigmodel") ? "bigmodel.cn" : "z.ai"
+    }
+}
+
 // MARK: - 默认配置
 
 extension APIConfig {
@@ -254,6 +270,8 @@ enum APIError: Error, LocalizedError {
 // MARK: - UserDefaults 扩展
 
 extension UserDefaults {
+    // MARK: - 旧版配置（兼容性）
+
     private enum Keys {
         static let baseURL = "ANTHROPIC_BASE_URL"
         static let authToken = "ANTHROPIC_AUTH_TOKEN"
@@ -277,5 +295,121 @@ extension UserDefaults {
     func clearAPIConfig() {
         removeObject(forKey: Keys.baseURL)
         removeObject(forKey: Keys.authToken)
+    }
+
+    // MARK: - 多账号配置
+
+    private enum AccountKeys {
+        static let accounts = "GLM_ACCOUNTS"
+        static let currentAccountId = "GLM_CURRENT_ACCOUNT_ID"
+        static let migrationCompleted = "GLM_MIGRATION_COMPLETED"
+    }
+
+    /// 迁移旧版配置到新账号系统
+    func migrateLegacyConfig() {
+        // 检查是否已完成迁移
+        if bool(forKey: AccountKeys.migrationCompleted) {
+            return
+        }
+
+        // 检查是否已有新格式数据
+        guard getAccounts().isEmpty else {
+            // 已有新数据，标记迁移完成
+            set(true, forKey: AccountKeys.migrationCompleted)
+            return
+        }
+
+        // 检查是否有旧配置
+        guard let baseURL = string(forKey: Keys.baseURL),
+              let authToken = string(forKey: Keys.authToken),
+              !baseURL.isEmpty, !authToken.isEmpty else {
+            // 没有旧配置，标记迁移完成
+            set(true, forKey: AccountKeys.migrationCompleted)
+            return
+        }
+
+        // 迁移到新格式
+        let account = AccountConfig(
+            id: UUID().uuidString,
+            name: "默认账号",
+            baseURL: baseURL,
+            authToken: authToken
+        )
+        addAccount(account)
+
+        // 清理旧配置
+        removeObject(forKey: Keys.baseURL)
+        removeObject(forKey: Keys.authToken)
+
+        // 标记迁移完成
+        set(true, forKey: AccountKeys.migrationCompleted)
+    }
+
+    /// 获取所有账号
+    func getAccounts() -> [AccountConfig] {
+        guard let data = data(forKey: AccountKeys.accounts),
+              let accounts = try? JSONDecoder().decode([AccountConfig].self, from: data) else {
+            return []
+        }
+        return accounts
+    }
+
+    /// 保存账号列表
+    func saveAccounts(_ accounts: [AccountConfig]) {
+        if let data = try? JSONEncoder().encode(accounts) {
+            set(data, forKey: AccountKeys.accounts)
+        }
+    }
+
+    /// 获取当前激活账号
+    func getCurrentAccount() -> AccountConfig? {
+        let accounts = getAccounts()
+        guard let currentId = string(forKey: AccountKeys.currentAccountId) else {
+            return accounts.first
+        }
+        return accounts.first { $0.id == currentId } ?? accounts.first
+    }
+
+    /// 设置当前激活账号
+    func setCurrentAccount(_ accountId: String) {
+        set(accountId, forKey: AccountKeys.currentAccountId)
+    }
+
+    /// 添加账号
+    func addAccount(_ account: AccountConfig) {
+        var accounts = getAccounts()
+        accounts.append(account)
+        saveAccounts(accounts)
+        // 如果是第一个账号，自动设为当前账号
+        if accounts.count == 1 {
+            setCurrentAccount(account.id)
+        }
+    }
+
+    /// 更新账号
+    func updateAccount(_ account: AccountConfig) {
+        var accounts = getAccounts()
+        if let index = accounts.firstIndex(where: { $0.id == account.id }) {
+            accounts[index] = account
+            saveAccounts(accounts)
+        }
+    }
+
+    /// 删除账号
+    func removeAccount(_ accountId: String) {
+        var accounts = getAccounts()
+        accounts.removeAll { $0.id == accountId }
+        saveAccounts(accounts)
+
+        // 如果删除的是当前账号，切换到第一个可用账号
+        if let currentId = string(forKey: AccountKeys.currentAccountId),
+           currentId == accountId, let firstAccount = accounts.first {
+            setCurrentAccount(firstAccount.id)
+        }
+    }
+
+    /// 检查是否有任何有效账号
+    func hasAnyValidAccount() -> Bool {
+        return !getAccounts().isEmpty
     }
 }

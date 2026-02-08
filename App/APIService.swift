@@ -9,7 +9,7 @@ import Foundation
 
 /// API 服务类，负责与 GLM Coding Plan API 交互
 class APIService {
-    private var config: APIConfig?
+    private var currentAccount: AccountConfig?
 
     // MARK: - API 类型
 
@@ -21,54 +21,82 @@ class APIService {
     // MARK: - 初始化
 
     init() {
-        loadConfig()
+        loadCurrentAccount()
     }
 
-    // MARK: - 配置管理
+    // MARK: - 账号管理
 
-    func loadConfig() {
-        if let apiConfig = UserDefaults.standard.getAPIConfig() {
-            config = APIConfig(baseURL: apiConfig.baseURL, authToken: apiConfig.authToken)
-        } else {
-            config = nil
+    func loadCurrentAccount() {
+        currentAccount = UserDefaults.standard.getCurrentAccount()
+    }
+
+    func updateAccount(_ account: AccountConfig) {
+        UserDefaults.standard.updateAccount(account)
+        if account.id == currentAccount?.id {
+            currentAccount = account
         }
     }
 
-    func updateConfig(baseURL: String, authToken: String) {
-        let newConfig = APIConfig(baseURL: baseURL, authToken: authToken)
-        UserDefaults.standard.setAPIConfig(baseURL: baseURL, authToken: authToken)
-        config = newConfig
+    func switchAccount(_ accountId: String) {
+        UserDefaults.standard.setCurrentAccount(accountId)
+        loadCurrentAccount()
+    }
+
+    func getCurrentAccountName() -> String? {
+        return currentAccount?.name
+    }
+
+    func getCurrentAccountId() -> String? {
+        return currentAccount?.id
     }
 
     func hasConfig() -> Bool {
-        config?.isValid ?? false
+        currentAccount?.isValid ?? false
+    }
+
+    // MARK: - 兼容旧版配置方法
+
+    func loadConfig() {
+        // 迁移旧配置并加载当前账号
+        UserDefaults.standard.migrateLegacyConfig()
+        loadCurrentAccount()
+    }
+
+    func updateConfig(baseURL: String, authToken: String) {
+        // 为旧版兼容保留，实际上更新当前账号的 Token
+        // baseURL 变更不支持，需要通过账号管理界面修改服务商
+        if var account = currentAccount {
+            account.authToken = authToken
+            UserDefaults.standard.updateAccount(account)
+            currentAccount = account
+        }
     }
 
     // MARK: - API 请求
 
     /// 刷新所有用量数据
     func refreshUsageData() async throws -> UsageData {
-        guard let config = config, config.isValid else {
+        guard let account = currentAccount, account.isValid else {
             throw APIError.invalidURL
         }
 
         // 检测 API 类型
-        let apiType: APIType = config.baseURL.contains("bigmodel") ? .bigmodel : .zai
+        let apiType: APIType = account.baseURL.contains("bigmodel") ? .bigmodel : .zai
 
         switch apiType {
         case .bigmodel:
-            return try await fetchBigModelUsageData(config: config)
+            return try await fetchBigModelUsageData(account: account)
         case .zai:
-            return try await fetchZaiUsageData(config: config)
+            return try await fetchZaiUsageData(account: account)
         }
     }
 
     // MARK: - BigModel API
 
-    private func fetchBigModelUsageData(config: APIConfig) async throws -> UsageData {
+    private func fetchBigModelUsageData(account: AccountConfig) async throws -> UsageData {
         // 并发请求配额和模型使用情况
-        async let quotaLimit = fetchBigModelQuotaLimit(config: config)
-        async let modelUsage = fetchBigModelModelUsage(config: config)
+        async let quotaLimit = fetchBigModelQuotaLimit(account: account)
+        async let modelUsage = fetchBigModelModelUsage(account: account)
 
         let (quotaData, _) = try await (quotaLimit, modelUsage)
 
@@ -140,13 +168,13 @@ class APIService {
         )
     }
 
-    private func fetchBigModelQuotaLimit(config: APIConfig) async throws -> BigModelQuotaData {
-        guard let url = URL(string: config.baseURL + "/monitor/usage/quota/limit") else {
+    private func fetchBigModelQuotaLimit(account: AccountConfig) async throws -> BigModelQuotaData {
+        guard let url = URL(string: account.baseURL + "/monitor/usage/quota/limit") else {
             throw APIError.invalidURL
         }
 
         var request = URLRequest(url: url)
-        request.setValue(config.authToken, forHTTPHeaderField: "Authorization")
+        request.setValue(account.authToken, forHTTPHeaderField: "Authorization")
         request.setValue("en-US,en", forHTTPHeaderField: "Accept-Language")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
@@ -170,7 +198,7 @@ class APIService {
         }
     }
 
-    private func fetchBigModelModelUsage(config: APIConfig) async throws -> BigModelModelUsageData {
+    private func fetchBigModelModelUsage(account: AccountConfig) async throws -> BigModelModelUsageData {
         // 计算时间窗口（过去 24 小时）
         let now = Date()
         let startDate = now.addingTimeInterval(-24 * 60 * 60)
@@ -182,7 +210,7 @@ class APIService {
         let startTime = dateFormatter.string(from: startDate)
         let endTime = dateFormatter.string(from: now)
 
-        var components = URLComponents(string: config.baseURL + "/monitor/usage/model-usage")
+        var components = URLComponents(string: account.baseURL + "/monitor/usage/model-usage")
         components?.queryItems = [
             URLQueryItem(name: "startTime", value: startTime),
             URLQueryItem(name: "endTime", value: endTime)
@@ -193,7 +221,7 @@ class APIService {
         }
 
         var request = URLRequest(url: url)
-        request.setValue(config.authToken, forHTTPHeaderField: "Authorization")
+        request.setValue(account.authToken, forHTTPHeaderField: "Authorization")
         request.setValue("en-US,en", forHTTPHeaderField: "Accept-Language")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
@@ -219,7 +247,7 @@ class APIService {
 
     // MARK: - Zai API
 
-    private func fetchZaiUsageData(config: APIConfig) async throws -> UsageData {
+    private func fetchZaiUsageData(account: AccountConfig) async throws -> UsageData {
         // 计算时间窗口（过去 24 小时）
         let now = Date()
         let startDate = now.addingTimeInterval(-24 * 60 * 60)
@@ -230,9 +258,9 @@ class APIService {
         let endTime = dateFormatter.string(from: endDate)
 
         // 并发请求三个端点
-        async let modelUsage = fetchZaiModelUsage(startTime: startTime, endTime: endTime, config: config)
-        async let toolUsage = fetchZaiToolUsage(startTime: startTime, endTime: endTime, config: config)
-        async let quotaLimit = fetchZaiQuotaLimit(config: config)
+        async let modelUsage = fetchZaiModelUsage(startTime: startTime, endTime: endTime, account: account)
+        async let toolUsage = fetchZaiToolUsage(startTime: startTime, endTime: endTime, account: account)
+        async let quotaLimit = fetchZaiQuotaLimit(account: account)
 
         // 等待所有请求完成
         let (modelData, toolData, quotaData) = try await (modelUsage, toolUsage, quotaLimit)
@@ -251,8 +279,8 @@ class APIService {
         )
     }
 
-    private func fetchZaiModelUsage(startTime: String, endTime: String, config: APIConfig) async throws -> [ModelUsageItem] {
-        var components = URLComponents(string: config.baseURL + "/api/monitor/usage/model-usage")
+    private func fetchZaiModelUsage(startTime: String, endTime: String, account: AccountConfig) async throws -> [ModelUsageItem] {
+        var components = URLComponents(string: account.baseURL + "/api/monitor/usage/model-usage")
         components?.queryItems = [
             URLQueryItem(name: "startTime", value: startTime),
             URLQueryItem(name: "endTime", value: endTime)
@@ -263,7 +291,7 @@ class APIService {
         }
 
         var request = URLRequest(url: url)
-        request.setValue(config.authToken, forHTTPHeaderField: "Authorization")
+        request.setValue(account.authToken, forHTTPHeaderField: "Authorization")
         request.setValue("en-US,en", forHTTPHeaderField: "Accept-Language")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
@@ -284,8 +312,8 @@ class APIService {
         }
     }
 
-    private func fetchZaiToolUsage(startTime: String, endTime: String, config: APIConfig) async throws -> [ToolUsageItem] {
-        var components = URLComponents(string: config.baseURL + "/api/monitor/usage/tool-usage")
+    private func fetchZaiToolUsage(startTime: String, endTime: String, account: AccountConfig) async throws -> [ToolUsageItem] {
+        var components = URLComponents(string: account.baseURL + "/api/monitor/usage/tool-usage")
         components?.queryItems = [
             URLQueryItem(name: "startTime", value: startTime),
             URLQueryItem(name: "endTime", value: endTime)
@@ -296,7 +324,7 @@ class APIService {
         }
 
         var request = URLRequest(url: url)
-        request.setValue(config.authToken, forHTTPHeaderField: "Authorization")
+        request.setValue(account.authToken, forHTTPHeaderField: "Authorization")
         request.setValue("en-US,en", forHTTPHeaderField: "Accept-Language")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
@@ -317,13 +345,13 @@ class APIService {
         }
     }
 
-    private func fetchZaiQuotaLimit(config: APIConfig) async throws -> QuotaLimitData {
-        guard let url = URL(string: config.baseURL + "/api/monitor/usage/quota/limit") else {
+    private func fetchZaiQuotaLimit(account: AccountConfig) async throws -> QuotaLimitData {
+        guard let url = URL(string: account.baseURL + "/api/monitor/usage/quota/limit") else {
             throw APIError.invalidURL
         }
 
         var request = URLRequest(url: url)
-        request.setValue(config.authToken, forHTTPHeaderField: "Authorization")
+        request.setValue(account.authToken, forHTTPHeaderField: "Authorization")
         request.setValue("en-US,en", forHTTPHeaderField: "Accept-Language")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
