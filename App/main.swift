@@ -10,10 +10,11 @@ import AppKit
 // MARK: - 配置对话框
 
 class ConfigDialog: NSWindow {
-    private let baseURLField: NSTextField = {
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
-        field.placeholderString = "https://api.zai.ai"
-        return field
+    private let baseURLPopup: NSPopUpButton = {
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+        popup.addItem(withTitle: "z.ai (api.zai.ai)")
+        popup.addItem(withTitle: "bigmodel.cn (open.bigmodel.cn/api)")
+        return popup
     }()
 
     private let tokenField: NSTextField = {
@@ -51,13 +52,13 @@ class ConfigDialog: NSWindow {
         contentView.addSubview(titleLabel)
 
         // Base URL 标签
-        let urlLabel = NSTextField(labelWithString: "Base URL:")
+        let urlLabel = NSTextField(labelWithString: "API 服务商:")
         urlLabel.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(urlLabel)
 
-        // Base URL 输入框
-        baseURLField.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(baseURLField)
+        // Base URL 下拉菜单
+        baseURLPopup.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(baseURLPopup)
 
         // Token 标签
         let tokenLabel = NSTextField(labelWithString: "Auth Token:")
@@ -94,11 +95,11 @@ class ConfigDialog: NSWindow {
             urlLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
             urlLabel.widthAnchor.constraint(equalToConstant: 80),
 
-            baseURLField.centerYAnchor.constraint(equalTo: urlLabel.centerYAnchor),
-            baseURLField.leadingAnchor.constraint(equalTo: urlLabel.trailingAnchor, constant: 12),
-            baseURLField.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
+            baseURLPopup.centerYAnchor.constraint(equalTo: urlLabel.centerYAnchor),
+            baseURLPopup.leadingAnchor.constraint(equalTo: urlLabel.trailingAnchor, constant: 12),
+            baseURLPopup.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
 
-            tokenLabel.topAnchor.constraint(equalTo: baseURLField.bottomAnchor, constant: 16),
+            tokenLabel.topAnchor.constraint(equalTo: baseURLPopup.bottomAnchor, constant: 16),
             tokenLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
             tokenLabel.widthAnchor.constraint(equalToConstant: 80),
 
@@ -116,16 +117,29 @@ class ConfigDialog: NSWindow {
 
     private func loadExistingConfig() {
         if let config = UserDefaults.standard.getAPIConfig() {
-            baseURLField.stringValue = config.baseURL
+            // 根据 baseURL 设置下拉菜单选中项
+            if config.baseURL.contains("bigmodel") {
+                baseURLPopup.selectItem(at: 1)
+            } else {
+                baseURLPopup.selectItem(at: 0)
+            }
             tokenField.stringValue = config.authToken
         }
     }
 
     @objc private func saveConfig() {
-        let baseURL = baseURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let index = baseURLPopup.indexOfSelectedItem
+        let baseURL: String
+        switch index {
+        case 1:
+            baseURL = "https://open.bigmodel.cn/api"
+        default: // case 0
+            baseURL = "https://api.zai.ai"
+        }
+
         let token = tokenField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        guard !baseURL.isEmpty, !token.isEmpty else {
+        guard !token.isEmpty else {
             showAlert(message: "请填写完整的配置信息")
             return
         }
