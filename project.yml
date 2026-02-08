@@ -1,0 +1,25 @@
+name: glm-usage
+options:
+  bundleIdPrefix: com.moonton
+  deploymentTarget:
+    macOS: 11.0
+  developmentLanguage: en
+
+targets:
+  glm-usage:
+    type: application
+    platform: macOS
+    deploymentTarget: 11.0
+    sources:
+      - App
+    info:
+      path: Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.moonton.glm-usage
+        SWIFT_VERSION: 5.9
+        DEVELOPMENT_TEAM: RKJSV9FQVR
+      debug:
+        CODE_SIGN_IDENTITY: "-"
+      release:
+        CODE_SIGN_IDENTITY: "-"
