@@ -6,6 +6,10 @@
 //
 
 import AppKit
+import os.log
+
+// 创建日志记录器
+private let logger = OSLog(subsystem: "com.moonton.glm-usage", category: "main")
 
 // MARK: - 配置对话框
 
@@ -14,6 +18,9 @@ class ConfigDialog: NSWindow {
         let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
         popup.addItem(withTitle: "z.ai (api.zai.ai)")
         popup.addItem(withTitle: "bigmodel.cn (open.bigmodel.cn/api)")
+        popup.addItem(withTitle: "moonshot.cn (api.moonshot.cn/v1)")
+        popup.addItem(withTitle: "deepseek.com (api.deepseek.com)")
+        popup.addItem(withTitle: "openrouter.ai (openrouter.ai)")
         return popup
     }()
 
@@ -120,10 +127,20 @@ class ConfigDialog: NSWindow {
             // 根据 baseURL 设置下拉菜单选中项
             if config.baseURL.contains("bigmodel") {
                 baseURLPopup.selectItem(at: 1)
+            } else if config.baseURL.contains("moonshot") {
+                baseURLPopup.selectItem(at: 2)
+            } else if config.baseURL.contains("deepseek") {
+                baseURLPopup.selectItem(at: 3)
+            } else if config.baseURL.contains("openrouter") {
+                baseURLPopup.selectItem(at: 4)
             } else {
                 baseURLPopup.selectItem(at: 0)
             }
-            tokenField.stringValue = config.authToken
+            // 隐藏 Bearer 前缀以便于查看
+            let displayToken = config.authToken.hasPrefix("Bearer ")
+                ? String(config.authToken.dropFirst(7))
+                : config.authToken
+            tokenField.stringValue = displayToken
         }
     }
 
@@ -133,15 +150,26 @@ class ConfigDialog: NSWindow {
         switch index {
         case 1:
             baseURL = "https://open.bigmodel.cn/api"
+        case 2:
+            baseURL = "https://api.moonshot.cn/v1"
+        case 3:
+            baseURL = "https://api.deepseek.com"
+        case 4:
+            baseURL = "https://openrouter.ai"
         default: // case 0
             baseURL = "https://api.zai.ai"
         }
 
-        let token = tokenField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        var token = tokenField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard !token.isEmpty else {
             showAlert(message: "请填写完整的配置信息")
             return
+        }
+
+        // 自动添加 Bearer 前缀（如果没有）
+        if !token.hasPrefix("Bearer ") {
+            token = "Bearer " + token
         }
 
         onSave?(baseURL, token)
@@ -212,6 +240,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 创建菜单栏图标
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem?.button {
+            // 启动时先用 GLM，等刷新数据后会显示账号名
             button.title = " GLM"
         }
 
@@ -313,47 +342,84 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateMenu() {
-        guard let data = currentUsageData else { return }
+        guard let data = currentUsageData else {
+            os_log("updateMenu: No currentUsageData", log: logger, type: .error)
+            return
+        }
+
+        os_log("updateMenu: isBalanceBased=%{public}@", log: logger, type: .info, String(data.isBalanceBased))
+        if let balance = data.formatBalance() {
+            os_log("updateMenu: Balance=%{public}@", log: logger, type: .info, balance)
+        }
+
+        // 获取当前账号名称
+        let accountName = apiService?.getCurrentAccountName() ?? "GLM"
 
         // 更新账号显示
         updateAccountDisplay()
 
-        // 更新标题栏百分比
-        let percent = Int(data.tokenUsagePercent * 100)
-        if let button = statusItem?.button {
-            button.title = " GLM \(percent)%"
-        }
-
-        // 更新 Token 用量百分比
-        tokenPercentItem?.title = "Token 用量: \(percent)%"
-
-        // 更新 Token 详细信息（包含重置时间）
-        var tokenTitle = "Token: \(formatNumber(data.tokenUsed)) / \(formatNumber(data.tokenLimit))"
-        if let resetTime = data.tokenResetTime {
-            tokenTitle += " (重置: \(data.resetTimeDescription(resetTime)))"
-        }
-        tokenDetailItem?.title = tokenTitle
-
-        // 更新 MCP 详细信息（包含重置时间）
-        let mcpPercent = Int(data.mcpUsagePercent * 100)
-        var mcpTitle = "MCP: \(formatNumber(data.mcpUsed)) / \(formatNumber(data.mcpLimit)) (\(mcpPercent)%)"
-        if let resetTime = data.mcpResetTime {
-            mcpTitle += " (重置: \(data.resetTimeDescription(resetTime)))"
-        }
-        mcpDetailItem?.title = mcpTitle
-
-        // 更新模型使用情况（显示前3个）
-        let topModels = Array(data.modelUsage.prefix(3))
-        for (index, item) in topModels.enumerated() {
-            if index < modelUsageItems.count {
-                let tokensStr = formatNumber(item.totalTokens)
-                modelUsageItems[index].title = "\(item.modelName): \(tokensStr) tokens"
+        // 更新标题栏和菜单显示
+        if data.isBalanceBased, let balance = data.formatBalance() {
+            // Moonshot/DeepSeek 余额显示
+            os_log("updateMenu: Showing balance %{public}@", log: logger, type: .info, balance)
+            if let button = statusItem?.button {
+                button.title = "\(accountName) \(balance)"
+                os_log("updateMenu: Set status bar title to '%{public}@ %{public}@'", log: logger, type: .info, accountName, balance)
             }
-        }
+            tokenPercentItem?.title = "余额: \(balance)"
 
-        // 隐藏多余的模型项
-        for index in topModels.count..<modelUsageItems.count {
-            modelUsageItems[index].isHidden = true
+            var balanceDetail = "可用: \(balance)"
+            if let cash = data.cashBalance, let voucher = data.voucherBalance {
+                balanceDetail += " (现金: ¥\(String(format: "%.2f", cash)), 代金券: ¥\(String(format: "%.2f", voucher)))"
+            }
+            tokenDetailItem?.title = balanceDetail
+
+            // 隐藏 MCP 用量（余额类型不支持）
+            mcpDetailItem?.isHidden = true
+
+            // 隐藏模型使用情况
+            for item in modelUsageItems {
+                item.isHidden = true
+            }
+        } else {
+            // Token 配额显示（z.ai / bigmodel.cn）
+            os_log("updateMenu: Showing token quota", log: logger, type: .info)
+            let percent = Int(data.tokenUsagePercent * 100)
+            if let button = statusItem?.button {
+                button.title = "\(accountName) \(percent)%"
+            }
+            tokenPercentItem?.title = "Token 用量: \(percent)%"
+
+            // 更新 Token 详细信息（包含重置时间）
+            var tokenTitle = "Token: \(formatNumber(data.tokenUsed)) / \(formatNumber(data.tokenLimit))"
+            if let resetTime = data.tokenResetTime {
+                tokenTitle += " (重置: \(data.resetTimeDescription(resetTime)))"
+            }
+            tokenDetailItem?.title = tokenTitle
+
+            // 更新 MCP 详细信息（包含重置时间）
+            let mcpPercent = Int(data.mcpUsagePercent * 100)
+            var mcpTitle = "MCP: \(formatNumber(data.mcpUsed)) / \(formatNumber(data.mcpLimit)) (\(mcpPercent)%)"
+            if let resetTime = data.mcpResetTime {
+                mcpTitle += " (重置: \(data.resetTimeDescription(resetTime)))"
+            }
+            mcpDetailItem?.title = mcpTitle
+            mcpDetailItem?.isHidden = false
+
+            // 更新模型使用情况（显示前3个）
+            let topModels = Array(data.modelUsage.prefix(3))
+            for (index, item) in topModels.enumerated() {
+                if index < modelUsageItems.count {
+                    let tokensStr = formatNumber(item.totalTokens)
+                    modelUsageItems[index].title = "\(item.modelName): \(tokensStr) tokens"
+                    modelUsageItems[index].isHidden = false
+                }
+            }
+
+            // 隐藏多余的模型项
+            for index in topModels.count..<modelUsageItems.count {
+                modelUsageItems[index].isHidden = true
+            }
         }
 
         // 更新时间
@@ -429,15 +495,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshUsageData() async {
         guard let apiService = apiService else { return }
 
+        // 先更新账号显示（无论 API 是否成功）
+        updateAccountDisplay()
+        updateSwitchAccountMenu()
+
         do {
             let data = try await apiService.refreshUsageData()
             currentUsageData = data
             updateMenu()
         } catch {
             print("刷新失败: \(error.localizedDescription)")
-            // 显示错误状态
+            // 显示错误状态 - 使用账号名称
+            let accountName = apiService.getCurrentAccountName() ?? "GLM"
             if let button = statusItem?.button {
-                button.title = " GLM !"
+                button.title = "\(accountName) !"
             }
             tokenPercentItem?.title = "刷新失败: \(error.localizedDescription)"
         }

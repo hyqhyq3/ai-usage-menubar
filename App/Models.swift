@@ -136,6 +136,84 @@ struct BigModelTotalUsage: Codable {
     }
 }
 
+// MARK: - Moonshot API 响应模型
+
+/// Moonshot 余额响应
+struct MoonshotBalanceResponse: Codable {
+    let code: Int
+    let data: MoonshotBalanceData
+    let scode: String
+    let status: Bool
+}
+
+struct MoonshotBalanceData: Codable {
+    let availableBalance: Double
+    let voucherBalance: Double
+    let cashBalance: Double
+
+    enum CodingKeys: String, CodingKey {
+        case availableBalance = "available_balance"
+        case voucherBalance = "voucher_balance"
+        case cashBalance = "cash_balance"
+    }
+}
+
+// MARK: - DeepSeek API 响应模型
+
+/// DeepSeek 余额响应
+struct DeepSeekBalanceResponse: Codable {
+    let isAvailable: Bool
+    let balanceInfos: [DeepSeekBalanceInfo]
+
+    enum CodingKeys: String, CodingKey {
+        case isAvailable = "is_available"
+        case balanceInfos = "balance_infos"
+    }
+}
+
+struct DeepSeekBalanceInfo: Codable {
+    let currency: String
+    let totalBalance: String
+    let grantedBalance: String
+    let toppedUpBalance: String
+
+    enum CodingKeys: String, CodingKey {
+        case currency
+        case totalBalance = "total_balance"
+        case grantedBalance = "granted_balance"
+        case toppedUpBalance = "topped_up_balance"
+    }
+}
+
+// MARK: - OpenRouter API 响应模型
+
+/// OpenRouter 余额响应
+struct OpenRouterBalanceResponse: Codable {
+    let data: OpenRouterBalanceData
+}
+
+struct OpenRouterBalanceData: Codable {
+    let label: String
+    let limit: Double?
+    let limitRemaining: Double?
+    let usage: Double
+    let usageDaily: Double
+    let usageWeekly: Double
+    let usageMonthly: Double
+    let isFreeTier: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case label
+        case limit
+        case limitRemaining = "limit_remaining"
+        case usage
+        case usageDaily = "usage_daily"
+        case usageWeekly = "usage_weekly"
+        case usageMonthly = "usage_monthly"
+        case isFreeTier = "is_free_tier"
+    }
+}
+
 // MARK: - 应用数据模型
 
 /// 用量数据汇总
@@ -149,6 +227,15 @@ struct UsageData {
     let lastUpdateTime: Date
     let tokenResetTime: Date?
     let mcpResetTime: Date?
+
+    // Moonshot 余额信息（可选）
+    let availableBalance: Double?
+    let cashBalance: Double?
+    let voucherBalance: Double?
+
+    var isBalanceBased: Bool {
+        return availableBalance != nil
+    }
 
     var tokenUsagePercent: Double {
         guard tokenLimit > 0 else { return 0 }
@@ -166,6 +253,12 @@ struct UsageData {
 
     var mcpRemaining: Int {
         max(0, mcpLimit - mcpUsed)
+    }
+
+    /// 格式化余额显示
+    func formatBalance() -> String? {
+        guard let balance = availableBalance else { return nil }
+        return String(format: "¥%.2f", balance)
     }
 
     /// 格式化重置时间显示
@@ -223,7 +316,17 @@ struct AccountConfig: Codable, Identifiable {
     }
 
     var serviceProvider: String {
-        baseURL.contains("bigmodel") ? "bigmodel.cn" : "z.ai"
+        if baseURL.contains("bigmodel") {
+            return "bigmodel.cn"
+        } else if baseURL.contains("moonshot") {
+            return "moonshot.cn"
+        } else if baseURL.contains("deepseek") {
+            return "deepseek.com"
+        } else if baseURL.contains("openrouter") {
+            return "openrouter.ai"
+        } else {
+            return "z.ai"
+        }
     }
 }
 

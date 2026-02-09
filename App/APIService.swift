@@ -16,6 +16,9 @@ class APIService {
     private enum APIType {
         case zai
         case bigmodel
+        case moonshot
+        case deepseek
+        case openrouter
     }
 
     // MARK: - 初始化
@@ -28,6 +31,11 @@ class APIService {
 
     func loadCurrentAccount() {
         currentAccount = UserDefaults.standard.getCurrentAccount()
+        if let account = currentAccount {
+            print("APIService: Loaded account '\(account.name)' (\(account.serviceProvider))")
+        } else {
+            print("APIService: No current account found")
+        }
     }
 
     func updateAccount(_ account: AccountConfig) {
@@ -38,6 +46,7 @@ class APIService {
     }
 
     func switchAccount(_ accountId: String) {
+        print("APIService: Switching to account ID: \(accountId)")
         UserDefaults.standard.setCurrentAccount(accountId)
         loadCurrentAccount()
     }
@@ -77,15 +86,37 @@ class APIService {
     /// 刷新所有用量数据
     func refreshUsageData() async throws -> UsageData {
         guard let account = currentAccount, account.isValid else {
+            print("API: Invalid account or no current account")
             throw APIError.invalidURL
         }
 
+        print("API: Fetching usage for account '\(account.name)' from \(account.baseURL)")
+
         // 检测 API 类型
-        let apiType: APIType = account.baseURL.contains("bigmodel") ? .bigmodel : .zai
+        let apiType: APIType
+        if account.baseURL.contains("bigmodel") {
+            apiType = .bigmodel
+        } else if account.baseURL.contains("moonshot") {
+            apiType = .moonshot
+        } else if account.baseURL.contains("deepseek") {
+            apiType = .deepseek
+        } else if account.baseURL.contains("openrouter") {
+            apiType = .openrouter
+        } else {
+            apiType = .zai
+        }
+
+        print("API: Detected type: \(apiType)")
 
         switch apiType {
         case .bigmodel:
             return try await fetchBigModelUsageData(account: account)
+        case .moonshot:
+            return try await fetchMoonshotBalanceData(account: account)
+        case .deepseek:
+            return try await fetchDeepSeekBalanceData(account: account)
+        case .openrouter:
+            return try await fetchOpenRouterBalanceData(account: account)
         case .zai:
             return try await fetchZaiUsageData(account: account)
         }
@@ -164,7 +195,10 @@ class APIService {
             toolUsage: [],
             lastUpdateTime: Date(),
             tokenResetTime: tokenResetTime,
-            mcpResetTime: mcpResetTime
+            mcpResetTime: mcpResetTime,
+            availableBalance: nil,
+            cashBalance: nil,
+            voucherBalance: nil
         )
     }
 
@@ -275,7 +309,10 @@ class APIService {
             toolUsage: toolData,
             lastUpdateTime: now,
             tokenResetTime: nil,
-            mcpResetTime: nil
+            mcpResetTime: nil,
+            availableBalance: nil,
+            cashBalance: nil,
+            voucherBalance: nil
         )
     }
 
@@ -368,6 +405,197 @@ class APIService {
         case 401:
             throw APIError.unauthorized
         default:
+            throw APIError.serverError(statusCode: httpResponse.statusCode)
+        }
+    }
+
+    // MARK: - Moonshot API
+
+    private func fetchMoonshotBalanceData(account: AccountConfig) async throws -> UsageData {
+        guard let url = URL(string: account.baseURL + "/users/me/balance") else {
+            throw APIError.invalidURL
+        }
+
+        // 确保 token 有 Bearer 前缀
+        let authToken = account.authToken.hasPrefix("Bearer ")
+            ? account.authToken
+            : "Bearer " + account.authToken
+
+        var request = URLRequest(url: url)
+        request.setValue(authToken, forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw APIError.invalidResponse
+        }
+
+        switch httpResponse.statusCode {
+        case 200...299:
+            let result = try JSONDecoder().decode(MoonshotBalanceResponse.self, from: data)
+            if !result.status {
+                throw APIError.serverError(statusCode: result.code)
+            }
+            // 将余额数据转换为 UsageData 格式
+            return UsageData(
+                tokenLimit: 0,
+                tokenUsed: 0,
+                mcpLimit: 0,
+                mcpUsed: 0,
+                modelUsage: [],
+                toolUsage: [],
+                lastUpdateTime: Date(),
+                tokenResetTime: nil,
+                mcpResetTime: nil,
+                availableBalance: result.data.availableBalance,
+                cashBalance: result.data.cashBalance,
+                voucherBalance: result.data.voucherBalance
+            )
+        case 401:
+            throw APIError.unauthorized
+        default:
+            throw APIError.serverError(statusCode: httpResponse.statusCode)
+        }
+    }
+
+    // MARK: - DeepSeek API
+
+    private func fetchDeepSeekBalanceData(account: AccountConfig) async throws -> UsageData {
+        guard let url = URL(string: account.baseURL + "/user/balance") else {
+            print("DeepSeek: Invalid URL - \(account.baseURL + "/user/balance")")
+            throw APIError.invalidURL
+        }
+
+        // 确保 token 有 Bearer 前缀
+        let authToken = account.authToken.hasPrefix("Bearer ")
+            ? account.authToken
+            : "Bearer " + account.authToken
+
+        var request = URLRequest(url: url)
+        request.setValue(authToken, forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        print("DeepSeek: Fetching from \(url.absoluteString)")
+        print("DeepSeek: Authorization header: \(account.authToken.prefix(20))...")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            print("DeepSeek: Invalid response")
+            throw APIError.invalidResponse
+        }
+
+        print("DeepSeek: Status code \(httpResponse.statusCode)")
+
+        // 打印响应内容用于调试
+        if let responseString = String(data: data, encoding: .utf8) {
+            print("DeepSeek: Response - \(responseString.prefix(500))")
+        }
+
+        switch httpResponse.statusCode {
+        case 200...299:
+            let result = try JSONDecoder().decode(DeepSeekBalanceResponse.self, from: data)
+            guard let balanceInfo = result.balanceInfos.first else {
+                throw APIError.decodingError(NSError(domain: "DeepSeekAPI", code: -1, userInfo: [NSLocalizedDescriptionKey: "No balance info found"]))
+            }
+
+            // 解析余额字符串为 Double
+            let totalBalance = Double(balanceInfo.totalBalance) ?? 0.0
+            let grantedBalance = Double(balanceInfo.grantedBalance) ?? 0.0
+            let toppedUpBalance = Double(balanceInfo.toppedUpBalance) ?? 0.0
+
+            print("DeepSeek: Balance - Total: ¥\(totalBalance), Cash: ¥\(toppedUpBalance), Voucher: ¥\(grantedBalance)")
+
+            // 将余额数据转换为 UsageData 格式
+            return UsageData(
+                tokenLimit: 0,
+                tokenUsed: 0,
+                mcpLimit: 0,
+                mcpUsed: 0,
+                modelUsage: [],
+                toolUsage: [],
+                lastUpdateTime: Date(),
+                tokenResetTime: nil,
+                mcpResetTime: nil,
+                availableBalance: totalBalance,
+                cashBalance: toppedUpBalance,
+                voucherBalance: grantedBalance
+            )
+        case 401:
+            print("DeepSeek: Unauthorized - check your API token")
+            throw APIError.unauthorized
+        default:
+            print("DeepSeek: Server error \(httpResponse.statusCode)")
+            throw APIError.serverError(statusCode: httpResponse.statusCode)
+        }
+    }
+
+    // MARK: - OpenRouter API
+
+    private func fetchOpenRouterBalanceData(account: AccountConfig) async throws -> UsageData {
+        guard let url = URL(string: account.baseURL + "/api/v1/auth/key") else {
+            print("OpenRouter: Invalid URL - \(account.baseURL + "/api/v1/auth/key")")
+            throw APIError.invalidURL
+        }
+
+        // 确保 token 有 Bearer 前缀
+        let authToken = account.authToken.hasPrefix("Bearer ")
+            ? account.authToken
+            : "Bearer " + account.authToken
+
+        var request = URLRequest(url: url)
+        request.setValue(authToken, forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        print("OpenRouter: Fetching from \(url.absoluteString)")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            print("OpenRouter: Invalid response")
+            throw APIError.invalidResponse
+        }
+
+        print("OpenRouter: Status code \(httpResponse.statusCode)")
+
+        switch httpResponse.statusCode {
+        case 200...299:
+            let result = try JSONDecoder().decode(OpenRouterBalanceResponse.self, from: data)
+            let balanceData = result.data
+
+            print("OpenRouter: Usage - $\(balanceData.usage)")
+
+            // OpenRouter 显示已使用额度（美元）
+            // 如果 limit 为 null，表示无限额度，只显示已使用
+            // 如果 limit 有值，可以显示剩余额度
+            let availableBalance: Double?
+            if let limit = balanceData.limit, let remaining = balanceData.limitRemaining {
+                availableBalance = remaining
+            } else {
+                availableBalance = nil
+            }
+
+            // 将使用数据转换为 UsageData 格式
+            return UsageData(
+                tokenLimit: 0,
+                tokenUsed: 0,
+                mcpLimit: 0,
+                mcpUsed: 0,
+                modelUsage: [],
+                toolUsage: [],
+                lastUpdateTime: Date(),
+                tokenResetTime: nil,
+                mcpResetTime: nil,
+                availableBalance: availableBalance,
+                cashBalance: nil,
+                voucherBalance: nil
+            )
+        case 401:
+            print("OpenRouter: Unauthorized - check your API token")
+            throw APIError.unauthorized
+        default:
+            print("OpenRouter: Server error \(httpResponse.statusCode)")
             throw APIError.serverError(statusCode: httpResponse.statusCode)
         }
     }
