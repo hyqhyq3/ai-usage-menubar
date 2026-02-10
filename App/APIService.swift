@@ -129,7 +129,7 @@ class APIService {
         async let quotaLimit = fetchBigModelQuotaLimit(account: account)
         async let modelUsage = fetchBigModelModelUsage(account: account)
 
-        let (quotaData, _) = try await (quotaLimit, modelUsage)
+        let (quotaData, modelUsageData) = try await (quotaLimit, modelUsage)
 
         // 从 quota 数据中提取信息
         var tokenLimit = 0
@@ -141,15 +141,24 @@ class APIService {
 
         for limit in quotaData.limits {
             if limit.type == "TOKENS_LIMIT" {
-                tokenLimit = limit.usage
-                tokenUsed = limit.currentValue
+                // 新 API 格式：usage 和 currentValue 不再返回
+                // 需要从模型使用 API 获取已用量，用 percentage 反推总限制
+                if limit.percentage > 0 {
+                    // percentage 是过去 24 小时的使用占比
+                    // 总限制 = 24小时使用量 / (percentage / 100)
+                    tokenUsed = modelUsageData.totalUsage.totalTokensUsage
+                    tokenLimit = Int(Double(tokenUsed) * 100.0 / Double(limit.percentage))
+                }
+
                 // nextResetTime 是毫秒级时间戳
                 if let resetTimestamp = limit.nextResetTime {
                     tokenResetTime = Date(timeIntervalSince1970: TimeInterval(resetTimestamp) / 1000)
                 }
+
+                print("BigModel TOKENS_LIMIT: percentage=\(limit.percentage)%, tokenUsed=\(tokenUsed), tokenLimit=\(tokenLimit)")
             } else if limit.type == "TIME_LIMIT" {
-                mcpLimit = limit.usage
-                mcpUsed = limit.currentValue
+                mcpLimit = limit.usage ?? 0
+                mcpUsed = limit.currentValue ?? 0
                 if let resetTimestamp = limit.nextResetTime {
                     mcpResetTime = Date(timeIntervalSince1970: TimeInterval(resetTimestamp) / 1000)
                 }
@@ -159,9 +168,9 @@ class APIService {
         // 创建模型使用情况列表
         var modelUsageItems: [ModelUsageItem] = []
 
-        // 从 usageDetails 中提取模型使用情况
-        if let tokensLimit = quotaData.limits.first(where: { $0.type == "TOKENS_LIMIT" }),
-           let details = tokensLimit.usageDetails, !details.isEmpty {
+        // 尝试从 TIME_LIMIT 的 usageDetails 中获取工具使用情况
+        if let timeLimit = quotaData.limits.first(where: { $0.type == "TIME_LIMIT" }),
+           let details = timeLimit.usageDetails, !details.isEmpty {
             for detail in details.prefix(3) {
                 modelUsageItems.append(ModelUsageItem(
                     id: UUID().uuidString,
@@ -178,9 +187,9 @@ class APIService {
         if modelUsageItems.isEmpty {
             modelUsageItems.append(ModelUsageItem(
                 id: UUID().uuidString,
-                modelName: "总用量",
-                usageCount: 1,
-                totalTokens: tokenUsed,
+                modelName: "24H总用量",
+                usageCount: modelUsageData.totalUsage.totalModelCallCount,
+                totalTokens: modelUsageData.totalUsage.totalTokensUsage,
                 cachedTokens: 0,
                 readCacheTokens: 0
             ))

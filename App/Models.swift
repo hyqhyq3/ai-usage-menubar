@@ -87,8 +87,8 @@ struct BigModelLimitItem: Codable {
     let type: String
     let unit: Int?
     let number: Int?
-    let usage: Int
-    let currentValue: Int
+    let usage: Int?
+    let currentValue: Int?
     let remaining: Int?
     let percentage: Int
     let usageDetails: [BigModelUsageDetail]?
