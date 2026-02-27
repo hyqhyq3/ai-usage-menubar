@@ -6,7 +6,9 @@
 //
 
 import AppKit
+import ServiceManagement
 import os.log
+import Carbon
 
 // 创建日志记录器
 private let logger = OSLog(subsystem: "com.moonton.glm-usage", category: "main")
@@ -212,6 +214,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var currentUsageData: UsageData?
     private var configDialog: ConfigDialog?
     private var accountManagerDialog: AccountManagerDialog?
+    
+    // 自启动服务标识符
+    private let loginServiceIdentifier = "com.moonton.glm-usage.LoginItem"
 
     // 菜单项引用
     private var currentAccountItem: NSMenuItem?
@@ -228,6 +233,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var refreshItem: NSMenuItem?
     private var manageAccountsItem: NSMenuItem?
     private var configItem: NSMenuItem?
+    private var startupItem: NSMenuItem?
     private var quitItem: NSMenuItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -260,6 +266,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 构建菜单
         buildMenu()
         updateAccountDisplay()
+        
+        // 检查当前自启动状态
+        updateStartupItemState()
     }
 
     private func buildMenu() {
@@ -277,7 +286,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         tokenPercentItem?.isEnabled = false
         menu.addItem(tokenPercentItem!)
 
-        // Token 详细信息
+        // Token 详解信息
         tokenDetailItem = NSMenuItem(title: "Token: -- / --", action: nil, keyEquivalent: "")
         tokenDetailItem?.isEnabled = false
         menu.addItem(tokenDetailItem!)
@@ -333,12 +342,94 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         configItem?.target = self
         menu.addItem(configItem!)
 
+        // 开机自启动
+        startupItem = NSMenuItem(title: "开机自启动", action: #selector(toggleStartup), keyEquivalent: "")
+        startupItem?.target = self
+        menu.addItem(startupItem!)
+
         // 退出按钮
         quitItem = NSMenuItem(title: "退出", action: #selector(quit), keyEquivalent: "q")
         quitItem?.target = self
         menu.addItem(quitItem!)
 
         statusItem.menu = menu
+    }
+    
+    private func updateStartupItemState() {
+        DispatchQueue.main.async {
+            // 检查当前自启动状态
+            if #available(macOS 13.0, *) {
+                let isStartupEnabled = self.isStartupEnabledModern()
+                if isStartupEnabled {
+                    self.startupItem?.state = .on
+                    self.startupItem?.title = "开机自启动"
+                } else {
+                    self.startupItem?.state = .off
+                    self.startupItem?.title = "开机自启动"
+                }
+            } else {
+                // 对于较老的 macOS 版本，暂时显示为关闭状态
+                self.startupItem?.state = .off
+                self.startupItem?.title = "开机自启动 (仅支持 macOS 13+)"
+            }
+        }
+    }
+    
+    @available(macOS 13.0, *)
+    private func isStartupEnabledModern() -> Bool {
+        do {
+            let service = SMAppService.mainApp
+            let status = try service.status
+            return status == .enabled
+        } catch {
+            print("检查开机自启动状态失败: \(error.localizedDescription)")
+            return false
+        }
+    }
+    
+    @objc private func toggleStartup() {
+        DispatchQueue.main.async {
+            if #available(macOS 13.0, *) {
+                self.toggleStartupModern()
+            } else {
+                // 对于较老的 macOS 版本，显示提示信息
+                let alert = NSAlert()
+                alert.messageText = "开机自启动功能"
+                alert.informativeText = "此功能需要 macOS 13.0 或更高版本才能正常工作。"
+                alert.alertStyle = .informational
+                alert.addButton(withTitle: "确定")
+                alert.runModal()
+            }
+        }
+    }
+    
+    @available(macOS 13.0, *)
+    private func toggleStartupModern() {
+        do {
+            let service = SMAppService.mainApp
+            let status = try service.status
+
+            if status == .enabled {
+                // 禁用自启动
+                try service.unregister()
+                self.startupItem?.state = .off
+                os_log("已禁用开机自启动", log: logger, type: .info)
+            } else {
+                // 启用自启动
+                try service.register()
+                self.startupItem?.state = .on
+                os_log("已启用开机自启动", log: logger, type: .info)
+            }
+        } catch {
+            print("切换开机自启动状态失败: \(error.localizedDescription)")
+            // 弹出警告提示用户
+            let alert = NSAlert()
+            alert.messageText = "设置开机自启动失败"
+            alert.informativeText = "请确保已授予相应权限，必要时可尝试重新授权。错误: \(error.localizedDescription)"
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "确定")
+            alert.runModal()
+        }
     }
 
     private func updateMenu() {
@@ -506,11 +597,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } catch {
             print("刷新失败: \(error.localizedDescription)")
             // 显示错误状态 - 使用账号名称
-            let accountName = apiService.getCurrentAccountName() ?? "GLM"
-            if let button = statusItem?.button {
-                button.title = "\(accountName) !"
+            DispatchQueue.main.async {
+                let accountName = self.apiService?.getCurrentAccountName() ?? "GLM"
+                if let button = self.statusItem?.button {
+                    button.title = "\(accountName) !"
+                }
+                self.tokenPercentItem?.title = "刷新失败: \(error.localizedDescription)"
             }
-            tokenPercentItem?.title = "刷新失败: \(error.localizedDescription)"
         }
     }
 
